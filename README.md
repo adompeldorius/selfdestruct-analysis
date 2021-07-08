@@ -1,5 +1,9 @@
 # Impact analysis of neutering the `SELFDESTRUCT` opcode in Ethereum
 
+# THIS IS A WORK IN PROGRESS
+
+This report is a work in progress and numbers could change before the final version. When finished, I will also release code needed to reproduce the results.
+
 ## Chain data retrieval
 
 In order to retrive chain data, I am running a local Geth node. Since I don't have the luxury of running an archive node, I have also retrieved data from the public `crypto_ethereum` Google BigQuery dataset, and Infura. In addition, I have fetched solidity code from etherscan.io.
@@ -12,11 +16,9 @@ There have been a total of 43,621,454 contract deployments on Ethereum Mainnet (
 * 32,032 (~8%) distinct bytecodes that do not have `SELFDESTRUCT`, but has either `CALLCODE` or `DELEGATECALL`, and
 * 345,623 (~87%) distinct bytecodes that do not have any of the three opcodes and are therefore indestructable.
 
-The bytecodes that contain either `SELFDESTRUCT`, `CALLCODE` or `DELEGATECALL` are labeled *destructible*. We define a contract to be destructible if its bytecode is destructible.
+The bytecodes that contain either `SELFDESTRUCT`, `CALLCODE` or `DELEGATECALL` are labeled *destructible*. We define a contract to be destructible if its bytecode is destructible. There are 37,313,775 destructible contracts in total.
 
-(Note: All contracts that are able to selfdestruct are labeled destructible, but not all contracts that are labeled destructible are actually able to selfdestruct)
-
-Among the 43,621,454 total deployed contracts, 
+Note that all contracts that are able to selfdestruct are labeled destructible, but not all contracts that are labeled destructible are actually able to selfdestruct. For instance, every contract that has `CALLCODE` or `DELEGATECALL` are labeled selfdestructible, because it might use such calls to trigger a selfdestruct.
 
 ### Redeployable contracts
 
