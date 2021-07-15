@@ -1,8 +1,6 @@
 # Impact analysis of neutering the `SELFDESTRUCT` opcode in Ethereum
 
-# THIS IS A WORK IN PROGRESS
-
-This report is a work in progress and numbers could change before the final version. When finished, I will also release code needed to reproduce the results.
+The report is hosted [here](https://nbviewer.jupyter.org/github/adompeldorius/selfdestruct-analysis/blob/main/analysis.ipynb).
 
 ## Chain data retrieval
 
