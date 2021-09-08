@@ -111,12 +111,14 @@ Instead of a two-layer structure as in the Patricia tree, in the Verkle tree we 
 | `NONCE_LEAF_KEY` | 2 |
 | `CODE_KECCAK_LEAF_KEY` | 3 |
 | `CODE_SIZE_LEAF_KEY` | 4 |
+| `INCARNATION_NUMBER_LEAF_KEY` | 5 |
 | `HEADER_STORAGE_OFFSET` | 64 |
 | `CODE_OFFSET` | 128 |
 | `VERKLE_NODE_WIDTH` | 256 |
 | `MAIN_STORAGE_OFFSET` | 256**31 |
+| `OFFSET_PER_INCARNATION` | 256**33 |
 
-_It's a required invariant that `VERKLE_NODE_WIDTH > CODE_OFFSET > HEADER_STORAGE_OFFSET` and that `HEADER_STORAGE_OFFSET` is greater than the leaf keys. Additionally, `MAIN_STORAGE_OFFSET` must be a power of `VERKLE_NODE_WIDTH`._
+_It's a required invariant that `VERKLE_NODE_WIDTH > CODE_OFFSET > HEADER_STORAGE_OFFSET` and that `HEADER_STORAGE_OFFSET` is greater than the leaf keys. Additionally, `MAIN_STORAGE_OFFSET` and `INCARNATION_OFFSET` must be powers of `VERKLE_NODE_WIDTH`.
 
 Note that addresses are always passed around as an `Address32`. To convert existing addresses to `Address32`, prepend with 12 zero bytes:
 
@@ -138,29 +140,34 @@ def pedersen_hash(inp: bytes) -> bytes32:
            [int.from_bytes(ext_input[16 * i:16 * (i + 1)]) for i in range(255)]
     return compute_commitment_root(ints).to_bytes(32, 'little')
 
-def get_tree_key(address: Address32, tree_index: int, sub_index: int):
+def get_tree_key(address: Address32, tree_index: int):
     # Asssumes VERKLE_NODE_WIDTH = 256
+    tree_index_bytes = tree_index.to_bytes(65, 'little')
     return (
-        pedersen_hash(address + tree_index.to_bytes(32, 'little'))[:31] +
-        bytes([sub_index])
+        pedersen_hash(address + tree_index_bytes[1:])[:31] +
+        [tree_index_bytes[0]]
     )
     
 def get_tree_key_for_version(address: Address32):
-    return get_tree_key(address, 0, VERSION_LEAF_KEY)
+    return get_tree_key(address, VERSION_LEAF_KEY)
     
 def get_tree_key_for_balance(address: Address32):
-    return get_tree_key(address, 0, BALANCE_LEAF_KEY)
+    return get_tree_key(address, BALANCE_LEAF_KEY)
     
 def get_tree_key_for_nonce(address: Address32):
-    return get_tree_key(address, 0, NONCE_LEAF_KEY)
+    return get_tree_key(address, NONCE_LEAF_KEY)
 
 # Backwards compatibility for EXTCODEHASH    
 def get_tree_key_for_code_keccak(address: Address32):
-    return get_tree_key(address, 0, CODE_KECCAK_LEAF_KEY)
+    return get_tree_key(address, CODE_KECCAK_LEAF_KEY)
     
 # Backwards compatibility for EXTCODESIZE
 def get_tree_key_for_code_size(address: Address32):
-    return get_tree_key(address, 0, CODE_SIZE_LEAF_KEY)
+    return get_tree_key(address, CODE_SIZE_LEAF_KEY)
+
+# Backwards compatibility for SELFDESTRUCT
+def get_tree_key_for_incarnation_number(address: Address32):
+    return get_tree_key(address, INCARNATION_NUMBER_LEAF_KEY)
 ```
 
 When any account header field is set, the `version` is also set to zero. The `code_keccak` and `code_size` fields are set upon contract creation.
@@ -168,12 +175,10 @@ When any account header field is set, the `version` is also set to zero. The `co
 ### Code
 
 ```python
-def get_tree_key_for_code_chunk(address: Address32, chunk_id: int):
-    return get_tree_key(
-        address,
-        (CODE_OFFSET + chunk_id) // VERKLE_NODE_WIDTH,
-        (CODE_OFFSET + chunk_id)  % VERKLE_NODE_WIDTH
-    )
+def get_tree_key_for_code_chunk(state: State, address: Address32, chunk_id: int):
+    # Here, incarnation_number is the value stored in the
+    # state at position get_tree_key_for_incarnation_number(address)
+    return get_tree_key(address, incarnation_number * OFFSET_PER_INCARNATION + CODE_OFFSET + chunk_id)
 ```
 
 Chunk `i` stores a 32 byte value, where bytes 1...31 are bytes `i*31...(i+1)*31 - 1` of the code (ie. the i’th 31-byte slice of it), and byte 0 is the number of leading bytes that are part of PUSHDATA (eg. if part of the code is `...PUSH4 99 98 | 97 96 PUSH1 128 MSTORE...` where `|` is the position where a new chunk begins, then the encoding of the latter chunk would begin `2 97 96 PUSH1 128 MSTORE` to reflect that the first 2 bytes are PUSHDATA).
@@ -210,17 +215,20 @@ def chunkify_code(code: bytes) -> Sequence[bytes32]:
 
 ### Storage
 
+
 ```python
-def get_tree_key_for_storage_slot(address: Address32, storage_key: int):
+def get_tree_index_for_storage_slot(address: Address32, storage_key: int) -> int:
     if storage_key < (CODE_OFFSET - HEADER_STORAGE_OFFSET):
-        pos = HEADER_STORAGE_OFFSET + storage_key
+        tree_index = HEADER_STORAGE_OFFSET + storage_key
     else:
-        pos = MAIN_STORAGE_OFFSET + storage_key
-    return get_tree_key(
-        address,
-        pos // VERKLE_NODE_WIDTH,
-        pos % VERKLE_NODE_WIDTH
-    ) 
+        tree_index = MAIN_STORAGE_OFFSET + storage_key
+    # Here, incarnation_number is the value stored in the
+    # state at position get_tree_key_for_incarnation_number(address)
+    return incarnation_number * OFFSET_PER_INCARNATION + tree_index
+
+def get_tree_key_for_storage_slot(address: Address32, storage_key: int):
+    tree_index = get_tree_index_for_storage_slot(address, storage_key)
+    return get_tree_key(address, tree_index)
 ```
 
 Note that storage slots in the same size `VERKLE_NODE_WIDTH` range (ie. a range the form `x*VERKLE_NODE_WIDTH ... (x+1)*VERKLE_NODE_WIDTH-1`) are all, with the exception of the `HEADER_STORAGE_OFFSET` special case, part of a single commitment. This is an optimization to make witnesses more efficient when related storage slots are accessed together. If desired, this optimization can be exposed to the gas schedule, making it more gas-efficient to make contracts that store related slots together (however, Solidity already stores in this way by default).
@@ -233,81 +241,71 @@ Data is saved to the Verkle tree when those fields are _modified_, or when they 
 
 ### Access events
 
-We define **access events** as follows. When an access event takes place, the accessed data is saved to the Verkle tree (even if it was not modified). An access event is of the form `(address, sub_key, leaf_key)`, determining what data is being accessed.
+We define **access events** as follows. When an access event takes place, the accessed data is saved to the Verkle tree (even if it was not modified). An access event is of the form `(address, leaf_key)`, determining what data is being accessed.
 
 #### Access events for account headers
 
 When a non-precompile `address` is the target of a `CALL`, `CALLCODE`, `DELEGATECALL`, `SELFDESTRUCT`, `EXTCODESIZE`, or `EXTCODECOPY` opcode, or is the target address of a contract creation whose initcode starts execution, process these access events:
 
 ```python
-(address, 0, VERSION_LEAF_KEY)
-(address, 0, CODE_SIZE_LEAF_KEY)
+(address, VERSION_LEAF_KEY)
+(address, CODE_SIZE_LEAF_KEY)
+(address, INCARNATION_NUMBER_LEAF_KEY)
 ```
 
 If a call is _value-bearing_ (ie. it transfers nonzero wei), whether or not the callee is a precompile, process these two access events:
 
 ```python
-(caller_address, 0, BALANCE_LEAF_KEY)
-(callee_address, 0, BALANCE_LEAF_KEY)
+(caller_address, BALANCE_LEAF_KEY)
+(callee_address, BALANCE_LEAF_KEY)
 ```
 
 When a contract is created, process these access events:
 
 ```python
-(contract_address, 0, VERSION_LEAF_KEY)
-(contract_address, 0, NONCE_LEAF_KEY)
-(contract_address, 0, BALANCE_LEAF_KEY)
-(contract_address, 0, CODE_KECCAK_LEAF_KEY)
-(contract_address, 0, CODE_SIZE_LEAF_KEY)
+(contract_address, VERSION_LEAF_KEY)
+(contract_address, NONCE_LEAF_KEY)
+(contract_address, BALANCE_LEAF_KEY)
+(contract_address, CODE_KECCAK_LEAF_KEY)
+(contract_address, CODE_SIZE_LEAF_KEY)
+(contract_address, INCARNATION_NUMBER_LEAF_KEY)
 ```
 
 If the `BALANCE` opcode is called targeting some `address`, process this access event:
 
 ```python
-(address, 0, BALANCE_LEAF_KEY)
+(address, BALANCE_LEAF_KEY)
 ```
 
 If the `SELFDESTRUCT` opcode is called by some `caller_address` targeting some `target_address` (regardless of whether it's value-bearing or not), process access events of the form:
 
 ```python
-(caller_address, 0, BALANCE_LEAF_KEY)
-(target_address, 0, BALANCE_LEAF_KEY)
+(caller_address, BALANCE_LEAF_KEY)
+(target_address, BALANCE_LEAF_KEY)
 ```
 
 If the `EXTCODEHASH` opcode is called targeting some `address`, process an access event of the form:
 
 ```python
-(address, 0, CODEHASH_LEAF_KEY)
+(address, CODEHASH_LEAF_KEY)
 ```
 
 #### Access events for storage
 
-`SLOAD` and `SSTORE` opcodes with a given `address` and `key` process an access event of the form
+`SLOAD` and `SSTORE` opcodes with a given `address` and `key` process access events of the form
 
 ```python
-(address, tree_key, sub_key)
-```
-
-Where `tree_key` and `sub_key` are computed as follows:
-
-```python
-def get_storage_slot_tree_keys(storage_key: int) -> [int, int]:
-    if storage_key < (CODE_OFFSET - HEADER_STORAGE_OFFSET):
-        pos = HEADER_STORAGE_OFFSET + storage_key
-    else:
-        pos = MAIN_STORAGE_OFFSET + storage_key
-    return (
-        pos // 256,
-        pos % 256
-    ) 
+(address, get_tree_index_for_storage_slot(address, key))
+(address, INCARNATION_NUMBER_LEAF_KEY)
 ```
 
 #### Access events for code
 
-In the conditions below, "chunk `chunk_id` is accessed" is understood to mean an access event of the form
+In the conditions below, "chunk `chunk_id` is accessed" is understood to mean access events of the form
 
 ```python
-(address, (chunk_id + 128) // 256, (chunk_id + 128) % 256)
+(address, incarnation_number * OFFSET_PER_INCARNATION + CODE_OFFSET + chunk_id)
+(address, INCARNATION_NUMBER_LEAF_KEY)
 ```
 
 * At each step of EVM execution, if and only if `PC < len(code)`, chunk `PC // CHUNK_SIZE` (where `PC` is the current program counter) of the callee is accessed. In particular, note the following corner cases:
@@ -329,16 +327,16 @@ In the conditions below, "chunk `chunk_id` is accessed" is understood to mean an
 For a transaction, make these access events:
 
 ```python
-(tx.origin, 0, VERSION_LEAF_KEY)
-(tx.origin, 0, BALANCE_LEAF_KEY)
-(tx.origin, 0, NONCE_LEAF_KEY)
-(tx.origin, 0, CODE_SIZE_LEAF_KEY)
-(tx.origin, 0, CODE_KECCAK_LEAF_KEY)
-(tx.target, 0, VERSION_LEAF_KEY)
-(tx.target, 0, BALANCE_LEAF_KEY)
-(tx.target, 0, NONCE_LEAF_KEY)
-(tx.target, 0, CODE_SIZE_LEAF_KEY)
-(tx.target, 0, CODE_KECCAK_LEAF_KEY)
+(tx.origin, VERSION_LEAF_KEY)
+(tx.origin, BALANCE_LEAF_KEY)
+(tx.origin, NONCE_LEAF_KEY)
+(tx.origin, CODE_SIZE_LEAF_KEY)
+(tx.origin, CODE_KECCAK_LEAF_KEY)
+(tx.target, VERSION_LEAF_KEY)
+(tx.target, BALANCE_LEAF_KEY)
+(tx.target, NONCE_LEAF_KEY)
+(tx.target, CODE_SIZE_LEAF_KEY)
+(tx.target, CODE_KECCAK_LEAF_KEY)
 ```
 
 ### Witness gas costs
@@ -351,12 +349,12 @@ For a transaction, make these access events:
 When executing a transaction, maintain two sets:
 
 * `accessed_subtrees: Set[Tuple[address, int]]`
-* `accessed_leaves: Set[Tuple[address, int, int]]`
+* `accessed_leaves: Set[Tuple[address, int]]`
 
-When an **access event** of `(address, sub_key, leaf_key)` occurs, perform the following checks:
+When an **access event** of `(address, sub_key)` occurs, perform the following checks:
 
-* If `(address, sub_key)` is not in `accessed_subtrees`, charge `WITNESS_BRANCH_COST` gas and add that tuple to `accessed_subtrees`.
-* If `leaf_key is not None` and `(address, sub_key, leaf_key)` is not in `accessed_leaves`, charge `WITNESS_CHUNK_COST` gas and add it to `accessed_leaves`
+* If `(address, sub_key // 256)` is not in `accessed_subtrees`, charge `WITNESS_BRANCH_COST` gas and add that tuple to `accessed_subtrees`.
+* If `(address, sub_key)` is not in `accessed_leaves`, charge `WITNESS_CHUNK_COST` gas and add it to `accessed_leaves`.
 
 ### Replacement for access lists
 
@@ -377,7 +375,7 @@ class AccessSubtree(Container):
 
 ### Miscellaneous
 
-* The `SELFDESTRUCT` opcode is renamed to `SENDALL`, and now _only_ immediately moves all ETH in the account to the target; it no longer destroys code or storage or alters the nonce
+* The `SELFDESTRUCT` opcode keeps its functionality, but instead of destroying code and storage from the state trie, the incarnation_number of the account is incremented by one.
 * All refunds are removed
 
 ## Rationale
@@ -394,7 +392,7 @@ The Verkle tree uses a single-layer tree structure with 32-byte keys and values 
 * **Uniformity**: the state is uniformly spread out throughout the tree; even if a single contract has many millions of storage slots, the contract's storage slots are not concentrated in one place. This is useful for state syncing algorithms. Additionally, it helps reduce the effectiveness of unbalanced tree filling attacks.
 * **Extensibility**: account headers and code being in the same structure as storage makes it easier to extend the features of both, and even add new structures if later desired.
 
-The single-layer tree design _does_ have a major weakness: the inability to deal with entire storage trees as a single object. This is why this EIP includes removing most of the functionality of `SELFDESTRUCT`. If absolutely desired, `SELFDESTRUCT`'s functionality could be kept by adding and incrementing an `account_state_offset` parameter that increments every time an account self-destructs, but this would increase complexity.
+The single-layer tree design _does_ have a major weakness: the inability to deal with entire storage trees as a single object. This is why `SELFDESTRUCT` under this EIP does not destroy state or code from the state tree, but instead adds and increments an `incarnation_number` parameter that increments every time an account self-destructs.
 
 ### Gas reform
 
@@ -423,8 +421,7 @@ Hence, while this EIP offers a very convenient path to implementing state expiry
 
 The three main backwards-compatibility-breaking changes are:
 
-1. `SELFDESTRUCT` neutering (see [here](https://hackmd.io/@vbuterin/selfdestruct) for a document stating the case for doing this despite the backwards compatibility loss)
-2. Gas costs for code chunk access making some applications less economically viable
-3. Tree structure change makes in-EVM proofs of historical state no longer work
+1. Gas costs for code chunk access making some applications less economically viable
+2. Tree structure change makes in-EVM proofs of historical state no longer work
 
-(2) can be mitigated by increasing the gas limit at the same time as implementing this EIP, reducing the risk that applications will no longer work at all due to transaction gas usage rising above the block gas limit. (3) cannot be mitigated this time, but [this proposal](https://ethresear.ch/t/future-proof-shard-and-history-access-precompiles/9781) could be implemented to make this no longer a concern for any tree structure changes in the future.
+(1) can be mitigated by increasing the gas limit at the same time as implementing this EIP, reducing the risk that applications will no longer work at all due to transaction gas usage rising above the block gas limit. (2) cannot be mitigated this time, but [this proposal](https://ethresear.ch/t/future-proof-shard-and-history-access-precompiles/9781) could be implemented to make this no longer a concern for any tree structure changes in the future.
